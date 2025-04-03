@@ -355,14 +355,14 @@ class RatServer(QMainWindow):
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind(('127.0.0.1', 8080))
+            self.server_socket.bind(('0.0.0.0', 8080))  # Accepter les connexions de toutes les interfaces
             self.server_socket.listen(5)
             
             self.server_thread = threading.Thread(target=self.accept_clients)
             self.server_thread.daemon = True
             self.server_thread.start()
             
-            print("Server started on 127.0.0.1:8080")
+            print("Server started on 0.0.0.0:8080")
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to start server: {str(e)}")

