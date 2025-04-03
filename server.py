@@ -508,14 +508,14 @@ class RatServer(QMainWindow):
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind(('127.0.0.1', 8080))
+            self.server_socket.bind(('0.0.0.0', 8080))
             self.server_socket.listen(5)
             
             self.server_thread = threading.Thread(target=self.accept_clients)
             self.server_thread.daemon = True
             self.server_thread.start()
             
-            logger.info("Serveur démarré sur 127.0.0.1:8080")
+            logger.info("Serveur démarré sur 0.0.0.0:8080")
             
         except Exception as e:
             logger.error(f"Erreur de démarrage du serveur: {e}")
