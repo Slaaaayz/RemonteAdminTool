@@ -39,13 +39,15 @@ class ClientHandler(QObject):
     def handle_system_info(self, address, info):
         """Handles system information updates from the client."""
         addr_str = f"{address[0]}:{address[1]}"
+        logger.debug(f"Received system info from {addr_str}: {info}")
+        
         if addr_str in self.main_window.clients_ui_data:
-            # Mettre à jour les données du client
+            # Mettre à jour les données du client avec les bonnes clés
             self.main_window.clients_ui_data[addr_str].update({
                 'hostname': info.get('hostname', 'N/A'),
                 'os': info.get('os', 'N/A'),
-                'cpu': f"{info.get('cpu_percent', 'N/A')}%",
-                'mem': f"{info.get('memory_percent', 'N/A')}%"
+                'cpu': f"{info.get('cpu', 'N/A')}%",
+                'mem': f"{info.get('memory', 'N/A')}%"
             })
             
             # Émettre le signal pour mettre à jour l'interface
@@ -53,8 +55,8 @@ class ClientHandler(QObject):
                 addr_str,
                 info.get('hostname', 'N/A'),
                 info.get('os', 'N/A'),
-                f"{info.get('cpu_percent', 'N/A')}%",
-                f"{info.get('memory_percent', 'N/A')}%"
+                f"{info.get('cpu', 'N/A')}%",
+                f"{info.get('memory', 'N/A')}%"
             )
 
     # --- GUI Update Methods are now in MainWindow ---

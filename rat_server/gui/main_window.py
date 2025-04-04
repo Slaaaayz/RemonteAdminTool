@@ -775,9 +775,8 @@ class MainWindow(QMainWindow):
                 if address:
                     # Request system info update
                     self.server_core.send_command(address, "get_system_info")
-                    # Request process list update if we're on the System tab
-                    if self.tabs.currentWidget() == self.system_tab:
-                        self.process_handler.refresh_processes()
+                    # Request process list update
+                    self.process_handler.refresh_processes()
         except Exception as e:
             logger.error(f"Error refreshing data: {e}")
 
