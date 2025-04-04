@@ -27,90 +27,182 @@ class FileHandler:
 
     # --- ServerCore Callback Handlers ---
 
-    def handle_directory_listing(self, address, files_data):
-        """Handles the directory listing received from the client."""
-        QMetaObject.invokeMethod(self.main_window, "_update_files_table",
-                                Qt.ConnectionType.QueuedConnection,
-                                Q_ARG(object, files_data))
-
-    def handle_file_content(self, address, content_b64):
-        """Handles receiving file content for viewing/editing."""
+    def handle_directory_listing(self, address, data):
+        """Gère la réception de la liste des fichiers."""
         addr_str = f"{address[0]}:{address[1]}"
-        # Check if an edit/view dialog is active for this client
-        if addr_str == self.main_window.selected_client_addr_str and self.current_edit_dialog:
-            QMetaObject.invokeMethod(self.main_window, "_update_editor_content", Qt.ConnectionType.QueuedConnection,
-                                     Q_ARG(str, content_b64))
+        if addr_str != self.main_window.selected_client_addr_str:
+            return
 
-    def handle_file_download_data(self, address, data_b64):
-        """Handles receiving file data for saving locally."""
+        error = data.get('error')
+        if error:
+            logger.error(f"Erreur de listage pour {addr_str}: {error}")
+            self.main_window._show_message_box("Erreur", f"Impossible de lister le dossier:\n{error}", "warning")
+            return
+
+        entries = data.get('entries', [])
+        current_path = data.get('current_path')
+
+        # Mettre à jour le chemin dans les données client
+        if current_path and addr_str in self.main_window.clients_ui_data:
+            self.main_window.clients_ui_data[addr_str]['current_path'] = current_path
+            self.main_window.path_edit.setText(current_path)
+
+        # Mettre à jour la table des fichiers
+        table = self.main_window.files_table
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+
+        for entry in entries:
+            row = table.rowCount()
+            table.insertRow(row)
+
+            name_item = QTableWidgetItem(entry.get('name', ''))
+            type_item = QTableWidgetItem(entry.get('type', ''))
+            size_item = QTableWidgetItem(entry.get('size', ''))
+            mod_item = QTableWidgetItem(entry.get('modified', ''))
+
+            # Définir l'icône selon le type
+            icon = QApplication.style().standardIcon(
+                QStyle.StandardPixmap.SP_DirIcon if entry.get('type') == 'Directory'
+                else QStyle.StandardPixmap.SP_FileIcon
+            )
+            name_item.setIcon(icon)
+
+            # Alignement
+            size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            mod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            table.setItem(row, 0, name_item)
+            table.setItem(row, 1, type_item)
+            table.setItem(row, 2, size_item)
+            table.setItem(row, 3, mod_item)
+
+        table.setSortingEnabled(True)
+        logger.debug(f"Table des fichiers mise à jour avec {len(entries)} entrées")
+
+    def handle_file_content(self, address, data):
+        """Gère la réception du contenu d'un fichier."""
         addr_str = f"{address[0]}:{address[1]}"
-        if addr_str == self.main_window.selected_client_addr_str and self._pending_download_path:
-            local_save_path = self._pending_download_path
-            self._pending_download_path = None # Consume the path
-            QMetaObject.invokeMethod(self.main_window, "_save_downloaded_file", Qt.ConnectionType.QueuedConnection,
-                                     Q_ARG(str, local_save_path), Q_ARG(str, data_b64))
-        elif self._pending_download_path:
-             logger.warning(f"Received file data for {addr_str} but pending download was for {self.main_window.selected_client_addr_str}")
-             self._pending_download_path = None # Clean up path anyway
+        if addr_str != self.main_window.selected_client_addr_str or not self.current_edit_dialog:
+            return
+
+        status = data.get('status')
+        if status == 'error':
+            error_msg = data.get('message', 'Erreur inconnue')
+            logger.error(f"Erreur de lecture du fichier pour {addr_str}: {error_msg}")
+            self.main_window._show_message_box("Erreur", f"Impossible de lire le fichier:\n{error_msg}", "warning")
+            if self.current_edit_dialog:
+                self.current_edit_dialog.reject()
+            return
+
+        content = data.get('content', '')
+        is_text = data.get('is_text', True)
+
+        text_edit = self.current_edit_dialog.findChild(QTextEdit)
+        if not text_edit:
+            return
+
+        try:
+            if is_text:
+                # Contenu texte direct
+                text_edit.setPlainText(content)
+            else:
+                # Contenu binaire encodé en base64
+                text_edit.setPlainText("Fichier binaire - Édition impossible")
+                text_edit.setReadOnly(True)
+        except Exception as e:
+            logger.error(f"Erreur d'affichage du contenu: {e}")
+            text_edit.setPlainText(f"Erreur de chargement: {str(e)}")
+
+    def handle_file_download_data(self, address, data):
+        """Gère la réception des données d'un fichier téléchargé."""
+        if not self._pending_download_path:
+            return
+
+        status = data.get('status')
+        if status == 'error':
+            error_msg = data.get('message', 'Erreur inconnue')
+            logger.error(f"Erreur de téléchargement: {error_msg}")
+            self.main_window._show_message_box("Erreur", f"Échec du téléchargement:\n{error_msg}", "warning")
+            self._pending_download_path = None
+            return
+
+        content = data.get('content', '')
+        try:
+            file_data = base64.b64decode(content)
+            with open(self._pending_download_path, 'wb') as f:
+                f.write(file_data)
+
+            logger.info(f"Fichier téléchargé: {self._pending_download_path}")
+            self.main_window._show_message_box(
+                "Succès",
+                f"Fichier enregistré:\n{self._pending_download_path}",
+                "information"
+            )
+
+            # Proposer d'ouvrir le dossier
+            reply = QMessageBox.question(
+                self.main_window,
+                "Ouvrir le dossier ?",
+                "Téléchargement terminé. Ouvrir le dossier ?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                folder_url = QUrl.fromLocalFile(os.path.dirname(self._pending_download_path))
+                QDesktopServices.openUrl(folder_url)
+
+        except Exception as e:
+            logger.error(f"Erreur d'enregistrement: {e}")
+            self.main_window._show_message_box(
+                "Erreur",
+                f"Impossible d'enregistrer le fichier:\n{e}",
+                "critical"
+            )
+        finally:
+            self._pending_download_path = None
+
+    def handle_write_file_response(self, address, data):
+        """Gère la réponse après une tentative d'écriture de fichier."""
+        addr_str = f"{address[0]}:{address[1]}"
+        status = data.get('status')
+        
+        if status == 'error':
+            error_msg = data.get('message', 'Erreur inconnue')
+            logger.error(f"Erreur d'écriture pour {addr_str}: {error_msg}")
+            self.main_window._show_message_box("Erreur", f"Impossible d'enregistrer le fichier:\n{error_msg}", "warning")
         else:
-             logger.warning(f"Received unexpected file data from {addr_str}")
+            logger.info(f"Fichier enregistré avec succès pour {addr_str}")
+            if self.current_edit_dialog:
+                self.current_edit_dialog.accept()
 
-    def handle_write_file_response(self, address, response_data):
-        """Handles the response after a write_file command."""
+    def handle_upload_response(self, address, data):
+        """Gère la réponse après une tentative d'upload."""
         addr_str = f"{address[0]}:{address[1]}"
-        status = response_data.get('status', 'error')
-        message = response_data.get('message', 'Unknown status')
-        if status == 'success':
-            logger.info(f"File write successful on {addr_str}")
-            # Maybe show a success message in the editor dialog?
-            if self.current_edit_dialog and hasattr(self.current_edit_dialog, 'status_label'):
-                 # Update dialog status safely (might need invokeMethod if dialog runs separately?)
-                 self.current_edit_dialog.status_label.setText("Saved successfully!")
-                 # Optionally close dialog automatically after short delay?
-                 # QTimer.singleShot(1000, self.current_edit_dialog.accept)
-        else:
-            logger.error(f"File write failed on {addr_str}: {message}")
-            # Show error in the main window or the dialog if it's still open
-            parent_widget = self.current_edit_dialog if self.current_edit_dialog else self.main_window
-            QMetaObject.invokeMethod(self.main_window, "_show_message_box", Qt.ConnectionType.QueuedConnection,
-                                     Q_ARG(str, "File Write Error"),
-                                     Q_ARG(str, f"Failed to write file on client:\n{message}"),
-                                     Q_ARG(str, "warning")) # Use main_window method directly
+        file_name = data.get('file_name', 'Fichier inconnu')
+        status = data.get('status')
 
-    def handle_rename_file_response(self, address, response_data):
-        """Handles the response after a rename_file command."""
-        addr_str = f"{address[0]}:{address[1]}"
-        status = response_data.get('status', 'error')
-        message = response_data.get('message', 'Unknown status')
-        if status == 'success':
-            logger.info(f"File rename successful on {addr_str}")
-            # Refresh file list automatically after a short delay
-            if addr_str == self.main_window.selected_client_addr_str:
-                 QTimer.singleShot(500, self.refresh_files) # Use the handler's refresh method
+        if status == 'error':
+            error_msg = data.get('message', 'Erreur inconnue')
+            logger.error(f"Erreur d'upload de '{file_name}' pour {addr_str}: {error_msg}")
+            self.main_window._show_message_box("Erreur", f"Impossible d'uploader '{file_name}':\n{error_msg}", "warning")
         else:
-            logger.error(f"File rename failed on {addr_str}: {message}")
-            QMetaObject.invokeMethod(self.main_window, "_show_message_box", Qt.ConnectionType.QueuedConnection,
-                                     Q_ARG(str, "File Rename Error"),
-                                     Q_ARG(str, f"Failed to rename file on client:\n{message}"),
-                                     Q_ARG(str, "warning"))
+            logger.info(f"Fichier '{file_name}' uploadé avec succès pour {addr_str}")
 
-    def handle_upload_response(self, address, response_data):
-        """Handles the response after a file upload attempt."""
+    def handle_rename_file_response(self, address, data):
+        """Gère la réponse après une tentative de renommage."""
         addr_str = f"{address[0]}:{address[1]}"
-        file_name = response_data.get('file_name', 'Unknown file')
-        status = response_data.get('status', 'success') # Assume success if no status
-        message = response_data.get('message', '')
-        if status == 'success':
-            logger.info(f"File '{file_name}' uploaded successfully to {addr_str}")
-            # Optionally refresh file list
-            if addr_str == self.main_window.selected_client_addr_str:
-                 QTimer.singleShot(500, self.refresh_files)
+        status = data.get('status')
+        
+        if status == 'error':
+            error_msg = data.get('message', 'Erreur inconnue')
+            logger.error(f"Erreur de renommage pour {addr_str}: {error_msg}")
+            self.main_window._show_message_box("Erreur", f"Impossible de renommer le fichier:\n{error_msg}", "warning")
         else:
-            logger.error(f"Upload of '{file_name}' failed on {addr_str}: {message}")
-            QMetaObject.invokeMethod(self.main_window, "_show_message_box", Qt.ConnectionType.QueuedConnection,
-                                     Q_ARG(str, "File Upload Error"),
-                                     Q_ARG(str, f"Failed to upload '{file_name}' to client:\n{message}"),
-                                     Q_ARG(str, "warning"))
+            old_path = data.get('old_path', '')
+            new_path = data.get('new_path', '')
+            logger.info(f"Fichier renommé avec succès pour {addr_str}: {old_path} -> {new_path}")
+            # Rafraîchir la liste des fichiers
+            self.refresh_files()
 
     # --- GUI Update Methods (Slots called by QMetaObject) ---
 
@@ -247,183 +339,182 @@ class FileHandler:
     # --- GUI Actions (Called directly from MainWindow slots) ---
 
     def refresh_files(self):
-        """Sends a request to list files in the current directory."""
+        """Demande la liste des fichiers du dossier courant."""
         address = self.main_window._get_selected_client_address()
-        if address:
-            current_path = self.main_window._get_current_client_path()
-            self.main_window.server_core.send_command(address, "list_directory", 
-                                                    {"path": current_path} if current_path else {})
-        else:
-            logger.warning("Refresh files called but no client selected.")
-            # Optionally clear the file table if no client is selected
-            # self._update_files_table_gui({'entries': [], 'current_path': ''})
+        if not address:
+            return
+
+        current_path = self.main_window._get_current_client_path()
+        self.main_window.server_core.send_command(
+            address,
+            "list_directory",
+            {"path": current_path} if current_path else {}
+        )
 
     def go_up_directory(self):
-        """Sends command to list the parent directory."""
-        mw = self.main_window
-        address = mw._get_selected_client_address()
-        current_path = mw._get_current_client_path()
-        if address and current_path:
-            # Calculate parent path conceptually (might not be exact on client OS)
-            # os.path.dirname handles trailing slashes correctly
-            parent = os.path.dirname(current_path)
+        """Remonte d'un niveau dans l'arborescence."""
+        address = self.main_window._get_selected_client_address()
+        current_path = self.main_window._get_current_client_path()
+        if not address or not current_path:
+            return
 
-            # Avoid sending command if already at root
-            if parent != current_path:
-                 logger.info(f"Requesting parent directory of '{current_path}' from {mw.selected_client_addr_str}")
-                 if mw.server_core:
-                      # Send the calculated parent path. Client should verify and list it.
-                      mw.server_core.send_command(address, 'list_directory', {'path': parent})
-                 else: logger.error("Server core unavailable.")
-            else:
-                 logger.info(f"Already at root directory: {current_path}")
-                 mw._show_message_box("Navigation Info", "Already at the root directory.", "information")
-        else:
-            logger.warning("Go up called but no client selected or path unknown.")
+        parent_path = os.path.dirname(current_path)
+        if parent_path == current_path:
+            self.main_window._show_message_box(
+                "Information",
+                "Déjà à la racine du système de fichiers.",
+                "information"
+            )
+            return
+
+        self.main_window.server_core.send_command(
+            address,
+            "list_directory",
+            {"path": parent_path}
+        )
 
     def create_new_directory(self):
-        """Prompts for and sends a command to create a new directory."""
-        mw = self.main_window
-        address = mw._get_selected_client_address()
-        current_path = mw._get_current_client_path()
-        if not address or current_path is None:
-            mw._show_message_box("Action Failed", "No client selected or current path unknown.", "warning")
+        """Crée un nouveau dossier."""
+        address = self.main_window._get_selected_client_address()
+        current_path = self.main_window._get_current_client_path()
+        if not address or not current_path:
+            self.main_window._show_message_box(
+                "Erreur",
+                "Aucun client sélectionné ou chemin inconnu.",
+                "warning"
+            )
             return
 
-        dir_name, ok = QInputDialog.getText(mw, "Create Directory", "Enter new directory name:")
-        if ok and dir_name:
-            # Basic validation - avoid slashes in the name itself
-            if '/' in dir_name or '\\' in dir_name:
-                 mw._show_message_box("Invalid Name", "Directory name cannot contain slashes.", "warning")
-                 return
+        name, ok = QInputDialog.getText(
+            self.main_window,
+            "Nouveau dossier",
+            "Nom du dossier:"
+        )
+        if not ok or not name:
+            return
 
-            # Use os.path.join for cross-platform compatibility (client interprets it)
-            new_dir_path = os.path.join(current_path, dir_name)
-            logger.info(f"Sending create directory command for '{new_dir_path}' to {mw.selected_client_addr_str}")
-            if mw.server_core:
-                success = mw.server_core.send_command(address, 'create_directory', {'path': new_dir_path})
-                if success:
-                    QTimer.singleShot(1000, self.refresh_files) # Refresh after delay
-                else:
-                     mw._show_message_box("Error", "Failed to send create directory command.", "critical")
-            else: logger.error("Server core unavailable.")
+        if '/' in name or '\\' in name:
+            self.main_window._show_message_box(
+                "Erreur",
+                "Le nom ne peut pas contenir de slash.",
+                "warning"
+            )
+            return
+
+        new_path = os.path.join(current_path, name)
+        self.main_window.server_core.send_command(
+            address,
+            "create_directory",
+            {"path": new_path}
+        )
 
     def upload_file_to_client(self):
-        """Opens dialog to select file(s) and sends upload command(s)."""
-        mw = self.main_window
-        address = mw._get_selected_client_address()
-        current_path = mw._get_current_client_path()
-        if not address or current_path is None:
-            mw._show_message_box("Action Failed", "No client selected or current path unknown.", "warning")
+        """Upload des fichiers vers le client."""
+        address = self.main_window._get_selected_client_address()
+        current_path = self.main_window._get_current_client_path()
+        if not address or not current_path:
+            self.main_window._show_message_box(
+                "Erreur",
+                "Aucun client sélectionné ou chemin inconnu.",
+                "warning"
+            )
             return
 
-        local_file_paths, _ = QFileDialog.getOpenFileNames(mw, "Select File(s) to Upload", mw.download_path) # Start in downloads
-
-        if not local_file_paths:
+        files, _ = QFileDialog.getOpenFileNames(
+            self.main_window,
+            "Sélectionner les fichiers",
+            self.main_window.download_path
+        )
+        if not files:
             return
 
-        if not mw.server_core:
-             mw._show_message_box("Error", "Server connection lost.", "critical")
-             return
-
-        for local_path in local_file_paths:
+        for file_path in files:
             try:
-                file_name = os.path.basename(local_path)
-                # Remote path is just the target directory on client
-                remote_target_dir = current_path
-
-                # Check file size before reading? Add limit?
-                # max_upload_size = 50 * 1024 * 1024 # 50 MB limit example
-                # if os.path.getsize(local_path) > max_upload_size:
-                #      logger.error(f"File exceeds size limit: {local_path}")
-                #      mw._show_message_box("Upload Error", f"File exceeds size limit ({max_upload_size // 1024 // 1024} MB):\n{file_name}", "warning")
-                #      continue
-
-                with open(local_path, 'rb') as f:
+                with open(file_path, 'rb') as f:
                     file_data = f.read()
+                    if not file_data:
+                        continue
 
-                if not file_data:
-                     logger.warning(f"Skipping empty file: {local_path}")
-                     continue
+                    file_name = os.path.basename(file_path)
+                    encoded_data = base64.b64encode(file_data).decode('utf-8')
 
-                encoded_data = base64.b64encode(file_data).decode('utf-8')
+                    self.main_window.server_core.send_command(
+                        address,
+                        "upload_file",
+                        {
+                            "path": current_path,
+                            "file_name": file_name,
+                            "data": encoded_data
+                        }
+                    )
 
-                logger.info(f"Sending upload command for '{file_name}' to directory '{remote_target_dir}' on {mw.selected_client_addr_str}")
-                # Sending target directory path and filename separately
-                success = mw.server_core.send_command(address, 'upload_file', {
-                    'path': remote_target_dir,
-                    'file_name': file_name,
-                    'data': encoded_data
-                })
-                if not success:
-                     mw._show_message_box("Error", f"Failed to send upload command for {file_name}.", "warning")
-                     # Stop uploading remaining files if one fails?
-                     # break
-
-            except FileNotFoundError:
-                 logger.error(f"Upload error: Local file not found {local_path}")
-                 mw._show_message_box("Upload Error", f"Local file not found:\n{local_path}", "critical")
-            except MemoryError:
-                  logger.error(f"Memory error reading file for upload: {local_path}")
-                  mw._show_message_box("Upload Error", f"Memory Error: File too large to upload?\n{local_path}", "critical")
             except Exception as e:
-                logger.error(f"Error preparing file for upload {local_path}: {e}")
-                mw._show_message_box("Upload Error", f"Could not read file:\n{local_path}\n\nError: {e}", "critical")
+                logger.error(f"Erreur d'upload de {file_path}: {e}")
+                self.main_window._show_message_box(
+                    "Erreur",
+                    f"Impossible d'uploader {os.path.basename(file_path)}:\n{e}",
+                    "warning"
+                )
 
     def download_selected_item(self):
-        """Initiates download for the selected file."""
-        mw = self.main_window
-        address = mw._get_selected_client_address()
-        current_path = mw._get_current_client_path()
-        if not address or current_path is None:
-             mw._show_message_box("Action Failed", "No client selected or path unknown.", "warning")
-             return
+        """Télécharge le fichier sélectionné."""
+        address = self.main_window._get_selected_client_address()
+        current_path = self.main_window._get_current_client_path()
+        if not address or not current_path:
+            self.main_window._show_message_box(
+                "Erreur",
+                "Aucun client sélectionné ou chemin inconnu.",
+                "warning"
+            )
+            return
 
-        selected_items = mw.files_table.selectedItems()
+        selected_items = self.main_window.files_table.selectedItems()
         if not selected_items:
-            mw._show_message_box("Action Failed", "No file or directory selected.", "warning")
+            self.main_window._show_message_box(
+                "Erreur",
+                "Aucun fichier sélectionné.",
+                "warning"
+            )
             return
 
         row = selected_items[0].row()
-        item_name = mw.files_table.item(row, 0).text() # Name column 0
-        item_type = mw.files_table.item(row, 1).text() # Type column 1
+        file_name = self.main_window.files_table.item(row, 0).text()
+        file_type = self.main_window.files_table.item(row, 1).text()
 
-        if item_type != "File":
-            mw._show_message_box("Action Failed", "Cannot download directories (yet). Please select a file.", "warning")
-            # TODO: Implement recursive directory download later if needed
+        if file_type != "File":
+            self.main_window._show_message_box(
+                "Erreur",
+                "Impossible de télécharger un dossier.",
+                "warning"
+            )
             return
 
-        remote_file_path = os.path.join(current_path, item_name)
+        remote_path = os.path.join(current_path, file_name)
+        save_path, _ = QFileDialog.getSaveFileName(
+            self.main_window,
+            "Enregistrer sous",
+            os.path.join(self.main_window.download_path, file_name)
+        )
+        if not save_path:
+            return
 
-        # Propose save location
-        default_local_path = os.path.join(mw.download_path, item_name)
-        local_save_path, _ = QFileDialog.getSaveFileName(mw, "Save File As", default_local_path)
-
-        if local_save_path:
-            # Store the path where the data should be saved when it arrives
-            self._pending_download_path = local_save_path
-            logger.info(f"Requesting download of '{remote_file_path}' from {mw.selected_client_addr_str} to save at '{local_save_path}'")
-            if mw.server_core:
-                success = mw.server_core.send_command(address, 'download_file', {'path': remote_file_path})
-                if not success:
-                     mw._show_message_box("Error", "Failed to send download command.", "critical")
-                     self._pending_download_path = None # Clear pending path if send failed
-            else:
-                 logger.error("Server core unavailable.")
-                 self._pending_download_path = None
-        else:
-             logger.info("Download cancelled by user.")
+        self._pending_download_path = save_path
+        self.main_window.server_core.send_command(
+            address,
+            "download_file",
+            {"path": remote_path}
+        )
 
     def view_selected_file(self):
-         """Opens a dialog to view the selected file's content."""
-         self._open_file_dialog(read_only=True)
+        """Affiche le contenu du fichier sélectionné."""
+        self._open_file_dialog(read_only=True)
 
     def edit_selected_file(self):
-         """Opens a dialog to edit the selected file's content."""
-         self._open_file_dialog(read_only=False)
+        """Édite le contenu du fichier sélectionné."""
+        self._open_file_dialog(read_only=False)
 
     def _open_file_dialog(self, read_only=False):
-        """Helper to open a view/edit dialog for the selected file."""
+        """Ouvre une boîte de dialogue pour voir/éditer un fichier."""
         mw = self.main_window
         address = mw._get_selected_client_address()
         current_path = mw._get_current_client_path()
@@ -556,7 +647,7 @@ class FileHandler:
          self.current_edit_dialog = None
 
     def rename_selected_item(self):
-        """Prompts for and sends command to rename selected file/directory."""
+        """Renomme le fichier/dossier sélectionné."""
         mw = self.main_window
         address = mw._get_selected_client_address()
         current_path = mw._get_current_client_path()

